@@ -1,7 +1,9 @@
 <Project Sdk="Godot.NET.Sdk/4.7.2">
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
-    <TargetFramework Condition=" '$(GodotTargetPlatform)' == 'android' ">net10.0</TargetFramework>
+    <!-- Godot's Android export templates only ship a .NET 9 runtime, and the
+         template (non-gradle) export path refuses any other target framework. -->
+    <TargetFramework Condition=" '$(GodotTargetPlatform)' == 'android' ">net9.0</TargetFramework>
     <EnableDynamicLoading>true</EnableDynamicLoading>
     <LangVersion>preview</LangVersion>
   </PropertyGroup>
@@ -18,4 +20,18 @@
     <PackageReference Include="Tomlyn" Version="0.20.0" />
     <PackageReference Include="Updatum" Version="1.3.2" />
   </ItemGroup>
+
+  <!--
+    SQLitePCLRaw.lib.e_sqlite3 only ships a glibc build for linux-arm64, which Android's
+    linker cannot dlopen, so the exported APK fails with DllNotFoundException: e_sqlite3.
+    Godot publishes with the android RID, so swap in the bionic build from the
+    SQLitePCLRaw.lib.e_sqlite3.android package after publish.
+  -->
+  <Target Name="RhythiaAndroidNativeSqlite" AfterTargets="Publish"
+          Condition=" '$(GodotTargetPlatform)' == 'android' ">
+    <Copy SourceFiles="$(MSBuildProjectDirectory)/android_native/libe_sqlite3.so"
+          DestinationFiles="$(PublishDir)libe_sqlite3.so"
+          OverwriteReadOnlyFiles="true" />
+  </Target>
+
 </Project>
