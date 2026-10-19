@@ -16,6 +16,19 @@ using Godot;
 /// </summary>
 public partial class GamepadInputManager : Node
 {
+    /// <summary>How the aim stick drives the in-game cursor.</summary>
+    public enum AimMapping
+    {
+        /// <summary>
+        /// The stick position *is* the cursor position on the grid (stick2mouse style,
+        /// what a 3x3 aim game wants). Centering the stick holds the cursor in place.
+        /// </summary>
+        Absolute,
+
+        /// <summary>Stick deflection is velocity, like any twin-stick shooter.</summary>
+        Velocity,
+    }
+
     /// <summary>Set to false to ignore the gamepad entirely (e.g. touch-only play).</summary>
     [Export]
     public bool Enabled = true;
@@ -27,6 +40,18 @@ public partial class GamepadInputManager : Node
     /// <summary>Aim with the right stick instead of the left one.</summary>
     [Export]
     public bool AimWithRightStick = false;
+
+    /// <summary>Absolute or velocity aiming; the mode used while a map is playing.</summary>
+    [Export]
+    public AimMapping Mapping = AimMapping.Absolute;
+
+    /// <summary>
+    /// Correction speed for <see cref="AimMapping.Absolute"/>, in mouse pixels per second
+    /// per grid unit of distance between the cursor and the stick. The loop is closed on
+    /// the real cursor position, so this stays correct at any sensitivity setting.
+    /// </summary>
+    [Export]
+    public float AbsoluteGain = 2400f;
 
     /// <summary>
     /// Cursor travel in mouse pixels per second at full stick deflection.
@@ -95,7 +120,10 @@ public partial class GamepadInputManager : Node
 
         if (aim != Vector2.Zero)
         {
-            moveCursor(aim * (StickSpeed * (float)delta));
+            var move = composeMove(aim, (float)delta);
+
+            if (move != Vector2.Zero)
+                moveCursor(move);
         }
         else if (ScrollWithRightStick && !AimWithRightStick)
         {
@@ -114,6 +142,42 @@ public partial class GamepadInputManager : Node
         }
 
         handleButtons();
+    }
+
+    /// <summary>
+    /// Turns a normalized aim direction into a mouse-pixel delta for this frame.
+    /// <para>
+    /// In absolute mode the delta steers the real cursor towards the grid position the
+    /// stick is pointing at, so the stick behaves like a position rather than a speed and
+    /// the mapping self-corrects whatever sensitivity the player picked.
+    /// </para>
+    /// </summary>
+    private Vector2 composeMove(Vector2 aim, float delta)
+    {
+        if (Mapping == AimMapping.Absolute && tryGetCursor(out var cursorWorld))
+        {
+            var target = new Vector2(aim.X, -aim.Y) * Constants.BOUNDS;
+            var error = target - cursorWorld;
+
+            // Screen Y grows downwards while the play field grows upwards, so flip Y.
+            return new Vector2(error.X, -error.Y) * (AbsoluteGain * delta);
+        }
+
+        return aim * (StickSpeed * delta);
+    }
+
+    /// <summary>Cursor position of the running attempt, in play-field units.</summary>
+    private static bool tryGetCursor(out Vector2 cursorWorld)
+    {
+        cursorWorld = Vector2.Zero;
+
+        var game = Game.Instance;
+
+        if (game is not { } running || !running.IsInsideTree() || running.Runner is not { Playing: true } || Game.Attempt is null)
+            return false;
+
+        cursorWorld = Game.Attempt.CursorPosition;
+        return cursorWorld.IsFinite();
     }
 
     private int findDevice()
