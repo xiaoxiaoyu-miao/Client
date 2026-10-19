@@ -36,13 +36,19 @@ public partial class Loading : BaseScene
         progressBar.Modulate = transparent;
 
         bool updateFound = false;
-        try
+
+        // Android builds are updated by reinstalling the APK, so the desktop self-updater
+        // (which downloads a platform-named release asset) is skipped there.
+        if (OS.GetName() != "Android")
         {
-            updateFound = await Releases.CheckForUpdatesAsync();
-        }
-        catch (Exception ex)
-        {
-            Logger.Log($"Could not get latest release: {ex.Message}");
+            try
+            {
+                updateFound = await Releases.CheckForUpdatesAsync();
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"Could not get latest release: {ex.Message}");
+            }
         }
 
         if (updateFound)

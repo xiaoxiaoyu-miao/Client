@@ -37,6 +37,7 @@ DatabaseService="*uid://c4t8bmpg1wmnv"
 SettingsManager="*res://scripts/SettingsManager.cs"
 SkinManager="*res://scripts/skinning/SkinManager.cs"
 MapManager="*uid://4by8r55q4bwn"
+GamepadInput="*res://scripts/GamepadInputManager.cs"
 KeybindsManager="*res://scripts/KeybindsManager.cs"
 Rhythia="*res://scripts/Rhythia.cs"
 Lobby="*res://scripts/multiplayer/Lobby.cs"
@@ -52,6 +53,7 @@ file_logging/enable_file_logging=true
 
 window/size/viewport_width=1280
 window/size/viewport_height=720
+window/handheld/orientation=4
 
 [dotnet]
 
@@ -85,6 +87,7 @@ common/physics_ticks_per_second=120
 
 [rendering]
 
+renderer/rendering_method.mobile="mobile"
 textures/vram_compression/import_etc2_astc=true
 textures/lossless_compression/force_png=true
 environment/defaults/default_clear_color=Color(0.0885599, 0.08855992, 0.08855987, 1)

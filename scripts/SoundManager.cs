@@ -268,7 +268,7 @@ public partial class SoundManager : Node, ISkinnable
 
         if (setRichPresence)
         {
-            Discord.Client.UpdateState($"Listening to {map.PrettyTitle}");
+            Discord.SetState($"Listening to {map.PrettyTitle}");
         }
     }
 
@@ -335,7 +335,7 @@ public partial class SoundManager : Node, ISkinnable
                 title += "...";
             }
 
-            Discord.Client.UpdateState($"Listening to {title}");
+            Discord.SetState($"Listening to {title}");
         }
     }
 

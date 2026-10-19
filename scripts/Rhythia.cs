@@ -232,7 +232,7 @@ public partial class Rhythia : Node
             Stats.Save();
         }
 
-        Discord.Client.Dispose();
+        Discord.Dispose();
 
         var quitTween = Instance.CreateTween();
         quitTween
