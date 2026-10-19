@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -19,10 +19,14 @@ public partial class MapManager : Node
 
     public static event Action<List<Map>> MapsInitialized;
 
-    public override void _Ready()
+    public override async void _Ready()
     {
         MapCache.Initialize();
-        Task.Run(() =>
+
+        // Import anything the player dropped in first, so the map list below sees it.
+        await importDroppedMaps();
+
+        await Task.Run(() =>
         {
             MapCache.Load(true);
 
@@ -32,6 +36,51 @@ public partial class MapManager : Node
                 MapsInitialized?.Invoke(Maps);
             }
         });
+    }
+
+    /// <summary>
+    /// Android has no usable file picker for arbitrary folders, so map files copied into
+    /// user://import are imported at startup and then moved to user://import/imported.
+    /// </summary>
+    private static async Task importDroppedMaps()
+    {
+        try
+        {
+            string folder = Path.Combine(Constants.USER_FOLDER, "import");
+            Directory.CreateDirectory(folder);
+
+            string[] files = Directory
+                .GetFiles(folder)
+                .Where(path => MapParser.IsValidExt(Path.GetExtension(path).TrimStart('.').ToLowerInvariant()))
+                .ToArray();
+
+            if (files.Length == 0)
+            {
+                return;
+            }
+
+            Logger.Log($"Importing {files.Length} map file(s) from {folder}");
+            await MapParser.BulkImport(files, true);
+
+            string imported = Path.Combine(folder, "imported");
+            Directory.CreateDirectory(imported);
+
+            foreach (var file in files)
+            {
+                try
+                {
+                    File.Move(file, Path.Combine(imported, Path.GetFileName(file)), true);
+                }
+                catch (Exception exception)
+                {
+                    Logger.Error(exception);
+                }
+            }
+        }
+        catch (Exception exception)
+        {
+            Logger.Error(exception);
+        }
     }
 
     public static void Select(Map map)

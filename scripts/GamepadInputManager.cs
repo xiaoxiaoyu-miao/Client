@@ -2,16 +2,12 @@ using System;
 using Godot;
 
 /// <summary>
-/// Feeds a connected gamepad into the client as if it were a mouse.
+/// Drives the client with a gamepad by synthesising mouse events, so gameplay aiming and the
+/// menus both go through the code paths they already use for a real mouse.
 /// <para>
-/// Rhythia reads aim as a relative mouse delta (<c>InputEventMouseMotion.Relative</c>) and
-/// reads the menus as a cursor position plus clicks, so the whole game can be driven by
-/// synthesising those events with <see cref="Input.ParseInputEvent"/>.
-/// </para>
-/// <para>
-/// This matters on Android, where there is no hardware cursor at all: nothing in the
-/// gameplay or the UI code has to change, and the same build stays playable with a
-/// real mouse/keyboard on desktop.
+/// On Android there is no hardware cursor, which is exactly why this works: the stick moves a
+/// virtual cursor, and <see cref="Input.ParseInputEvent"/> feeds it (and the clicks) into the
+/// normal input pipeline.
 /// </para>
 /// </summary>
 public partial class GamepadInputManager : Node
@@ -20,75 +16,71 @@ public partial class GamepadInputManager : Node
     public enum AimMapping
     {
         /// <summary>
-        /// The stick position *is* the cursor position on the grid (stick2mouse style,
-        /// what a 3x3 aim game wants). Centering the stick holds the cursor in place.
+        /// Stick position *is* the cursor position on the grid, optionally snapped to cell
+        /// centers. This is what an aim game on a 3x3 grid wants.
         /// </summary>
         Absolute,
 
-        /// <summary>Stick deflection is velocity, like any twin-stick shooter.</summary>
+        /// <summary>Stick deflection is velocity, like a twin-stick shooter.</summary>
         Velocity,
     }
 
-    /// <summary>Set to false to ignore the gamepad entirely (e.g. touch-only play).</summary>
     [Export]
     public bool Enabled = true;
 
-    /// <summary>Preferred joypad device index; falls back to the first connected pad.</summary>
+    /// <summary>Preferred joypad device index; falls back to whatever answers first.</summary>
     [Export]
     public int PreferredDevice = 0;
 
-    /// <summary>Aim with the right stick instead of the left one.</summary>
+    /// <summary>Aim with the right stick. The left stick still works as a fallback.</summary>
     [Export]
-    public bool AimWithRightStick = false;
+    public bool AimWithRightStick = true;
 
-    /// <summary>Absolute or velocity aiming; the mode used while a map is playing.</summary>
+    /// <summary>
+    /// Snap the absolute aim target to the nearest cell center, turning the stick into a
+    /// 3x3 position selector. This is what makes hits feel solid instead of fuzzy.
+    /// </summary>
+    [Export]
+    public bool SnapToCells = true;
+
+    /// <summary>Grid cells per side used for snapping (the play field is 3x3).</summary>
+    [Export]
+    public int GridCells = 3;
+
     [Export]
     public AimMapping Mapping = AimMapping.Absolute;
 
-    /// <summary>
-    /// Correction speed for <see cref="AimMapping.Absolute"/>, in mouse pixels per second
-    /// per grid unit of distance between the cursor and the stick. The loop is closed on
-    /// the real cursor position, so this stays correct at any sensitivity setting.
-    /// </summary>
+    /// <summary>Absolute-mode correction speed, in mouse pixels per second per grid unit.</summary>
     [Export]
-    public float AbsoluteGain = 2400f;
+    public float AbsoluteGain = 3600f;
 
-    /// <summary>
-    /// Cursor travel in mouse pixels per second at full stick deflection.
-    /// The game divides this by the player's sensitivity (default 0.5) and by 120,
-    /// so ~900 crosses the whole 3x3 grid in roughly 0.7 s.
-    /// </summary>
+    /// <summary>Menu cursor speed in mouse pixels per second at full deflection.</summary>
     [Export]
     public float StickSpeed = 900f;
 
-    /// <summary>Stick travel ignored before the cursor starts moving.</summary>
     [Export]
-    public float Deadzone = 0.15f;
+    public float Deadzone = 0.18f;
 
-    /// <summary>
-    /// Response curve exponent. Values above 1 give finer control near the center and
-    /// still allow full-speed sweeps, which is what an aim game wants.
-    /// </summary>
     [Export]
     public float ResponseExponent = 2.0f;
 
-    /// <summary>Right stick scrolls menus (wheel up/down) while the aim stick is idle.</summary>
     [Export]
     public bool ScrollWithRightStick = true;
 
     private const float ScrollThreshold = 0.55f;
     private const double ScrollInterval = 0.12;
-    private const double DeviceRefreshInterval = 0.5;
+    private const int ProbeDeviceCount = 8;
 
     private int device = -1;
-    private double sinceDeviceRefresh;
     private double scrollCooldown;
+    private double announcementCooldown;
     private Vector2 cursor;
     private bool cursorReady;
     private bool leftHeld;
     private bool pauseHeld;
     private bool skipHeld;
     private bool backHeld;
+    private bool announced;
 
     public bool HasGamepad => device >= 0;
 
@@ -101,20 +93,22 @@ public partial class GamepadInputManager : Node
     public override void _Process(double delta)
     {
         if (!Enabled)
-            return;
-
-        sinceDeviceRefresh += delta;
-
-        if (sinceDeviceRefresh >= DeviceRefreshInterval)
         {
-            sinceDeviceRefresh = 0;
-            device = findDevice();
+            return;
+        }
+
+        refreshCursor();
+
+        if (device < 0)
+        {
+            announce(delta, "no joypad reported yet; probing ids");
+            device = probeForActivity();
         }
 
         if (device < 0)
+        {
             return;
-
-        refreshCursor();
+        }
 
         var aim = readAim();
 
@@ -123,61 +117,69 @@ public partial class GamepadInputManager : Node
             var move = composeMove(aim, (float)delta);
 
             if (move != Vector2.Zero)
-                moveCursor(move);
-        }
-        else if (ScrollWithRightStick && !AimWithRightStick)
-        {
-            scrollCooldown -= delta;
-
-            if (scrollCooldown <= 0)
             {
-                var wheel = Input.GetJoyAxis(device, JoyAxis.RightY);
-
-                if (Mathf.Abs(wheel) > ScrollThreshold)
-                {
-                    sendWheel(wheel < 0);
-                    scrollCooldown = ScrollInterval;
-                }
+                moveCursor(move);
             }
+        }
+        else if (ScrollWithRightStick)
+        {
+            scroll(delta);
         }
 
         handleButtons();
     }
 
-    /// <summary>
-    /// Turns a normalized aim direction into a mouse-pixel delta for this frame.
-    /// <para>
-    /// In absolute mode the delta steers the real cursor towards the grid position the
-    /// stick is pointing at, so the stick behaves like a position rather than a speed and
-    /// the mapping self-corrects whatever sensitivity the player picked.
-    /// </para>
-    /// </summary>
-    private Vector2 composeMove(Vector2 aim, float delta)
+    private void announce(double delta, string message)
     {
-        if (Mapping == AimMapping.Absolute && tryGetCursor(out var cursorWorld))
+        if (announced)
         {
-            var target = new Vector2(aim.X, -aim.Y) * Constants.BOUNDS;
-            var error = target - cursorWorld;
-
-            // Screen Y grows downwards while the play field grows upwards, so flip Y.
-            return new Vector2(error.X, -error.Y) * (AbsoluteGain * delta);
+            return;
         }
 
-        return aim * (StickSpeed * delta);
+        announcementCooldown -= delta;
+
+        if (announcementCooldown > 0)
+        {
+            return;
+        }
+
+        announcementCooldown = 5;
+        GD.Print($"[Gamepad] {message}");
     }
 
-    /// <summary>Cursor position of the running attempt, in play-field units.</summary>
-    private static bool tryGetCursor(out Vector2 cursorWorld)
+    /// <summary>
+    /// Some backends only register a pad once it sends input, so fall back to asking each id
+    /// directly whether anything is held or deflected.
+    /// </summary>
+    private int probeForActivity()
     {
-        cursorWorld = Vector2.Zero;
+        for (int id = 0; id < ProbeDeviceCount; id++)
+        {
+            for (int axis = 0; axis < 8; axis++)
+            {
+                if (Mathf.Abs(Input.GetJoyAxis(id, (JoyAxis)axis)) > Deadzone)
+                {
+                    return adopt(id, "axis activity");
+                }
+            }
 
-        var game = Game.Instance;
+            for (int button = 0; button < 21; button++)
+            {
+                if (Input.IsJoyButtonPressed(id, (JoyButton)button))
+                {
+                    return adopt(id, "button press");
+                }
+            }
+        }
 
-        if (game is not { } running || !running.IsInsideTree() || running.Runner is not { Playing: true } || Game.Attempt is null)
-            return false;
+        return -1;
+    }
 
-        cursorWorld = Game.Attempt.CursorPosition;
-        return cursorWorld.IsFinite();
+    private int adopt(int id, string reason)
+    {
+        GD.Print($"[Gamepad] using device {id} ({reason})");
+        announced = true;
+        return id;
     }
 
     private int findDevice()
@@ -185,15 +187,19 @@ public partial class GamepadInputManager : Node
         var connected = Input.GetConnectedJoypads();
 
         if (connected.Count == 0)
+        {
             return -1;
+        }
 
         foreach (var joypad in connected)
         {
             if (joypad == PreferredDevice)
-                return joypad;
+            {
+                return adopt(joypad, "preferred id");
+            }
         }
 
-        return connected[0];
+        return adopt(connected[0], "first connected pad");
     }
 
     private void refreshCursor()
@@ -209,18 +215,71 @@ public partial class GamepadInputManager : Node
         // Track a real mouse on desktop; on Android the reported touch position is
         // meaningless for us, so trust the cursor we accumulate ourselves.
         if (OS.GetName() != "Android")
+        {
             cursor = GetViewport().GetMousePosition();
+        }
     }
 
-    /// <summary>Normalized aim direction, deadzone-corrected and response-curved.</summary>
+    /// <summary>Turns a normalized aim direction into a mouse-pixel delta for this frame.</summary>
+    private Vector2 composeMove(Vector2 aim, float delta)
+    {
+        if (Mapping == AimMapping.Absolute && tryGetCursor(out var cursorWorld))
+        {
+            var target = new Vector2(aim.X, -aim.Y) * Constants.BOUNDS;
+
+            if (SnapToCells && GridCells > 1)
+            {
+                target = snapToCell(target);
+            }
+
+            var error = target - cursorWorld;
+
+            // Screen Y grows downwards while the play field grows upwards, so flip Y.
+            return new Vector2(error.X, -error.Y) * (AbsoluteGain * delta);
+        }
+
+        return aim * (StickSpeed * delta);
+    }
+
+    /// <summary>Rounds a play-field position onto the nearest cell center.</summary>
+    private Vector2 snapToCell(Vector2 position)
+    {
+        // The play field spans [-BOUNDS, BOUNDS] and holds GridCells cells per side, so cell
+        // centers sit a whole cell apart with the middle one at zero.
+        float spacing = Constants.BOUNDS.X * 2f / Mathf.Max(GridCells - 1, 1);
+        var snapped = new Vector2(Mathf.Round(position.X / spacing), Mathf.Round(position.Y / spacing)) * spacing;
+        return snapped.Clamp(-Constants.BOUNDS, Constants.BOUNDS);
+    }
+
+    private static bool tryGetCursor(out Vector2 cursorWorld)
+    {
+        cursorWorld = Vector2.Zero;
+
+        var game = Game.Instance;
+
+        if (game is not { } running || !running.IsInsideTree() || running.Runner is not { Playing: true } || Game.Attempt is null)
+        {
+            return false;
+        }
+
+        cursorWorld = Game.Attempt.CursorPosition;
+        return cursorWorld.IsFinite();
+    }
+
     private Vector2 readAim()
     {
-        var stick = new Vector2(
-            Input.GetJoyAxis(device, AimWithRightStick ? JoyAxis.RightX : JoyAxis.LeftX),
-            Input.GetJoyAxis(device, AimWithRightStick ? JoyAxis.RightY : JoyAxis.LeftY)
-        );
+        var right = new Vector2(Input.GetJoyAxis(device, JoyAxis.RightX), Input.GetJoyAxis(device, JoyAxis.RightY));
+        var left = new Vector2(Input.GetJoyAxis(device, JoyAxis.LeftX), Input.GetJoyAxis(device, JoyAxis.LeftY));
 
-        // D-pad acts as full-deflection aiming, handy for lining up on the grid.
+        // Prefer the configured stick, but accept the other one so a single-stick pad still works.
+        var stick = AimWithRightStick ? right : left;
+        var fallback = AimWithRightStick ? left : right;
+
+        if (stick.Length() <= Deadzone && fallback.Length() > Deadzone)
+        {
+            stick = fallback;
+        }
+
         var dpad = Vector2.Zero;
 
         if (Input.IsJoyButtonPressed(device, JoyButton.DpadLeft))
@@ -235,20 +294,44 @@ public partial class GamepadInputManager : Node
         var direction = stick + dpad;
 
         if (direction == Vector2.Zero)
+        {
             return Vector2.Zero;
+        }
 
-        // Stick and d-pad can overlap; keep the result within the unit circle.
         if (direction.Length() > 1)
+        {
             direction = direction.Normalized();
+        }
 
         var magnitude = direction.Length();
 
         if (magnitude <= Deadzone)
+        {
             return Vector2.Zero;
+        }
 
         var curved = Mathf.Pow(Mathf.Min((magnitude - Deadzone) / (1 - Deadzone), 1), ResponseExponent);
 
         return direction / magnitude * curved;
+    }
+
+    private void scroll(double delta)
+    {
+        scrollCooldown -= delta;
+
+        if (scrollCooldown > 0)
+        {
+            return;
+        }
+
+        // In menus the right stick aims, so scrolling uses the other stick's vertical axis.
+        var wheel = Input.GetJoyAxis(device, AimWithRightStick ? JoyAxis.LeftY : JoyAxis.RightY);
+
+        if (Mathf.Abs(wheel) > ScrollThreshold)
+        {
+            sendWheel(wheel < 0);
+            scrollCooldown = ScrollInterval;
+        }
     }
 
     private void handleButtons()
